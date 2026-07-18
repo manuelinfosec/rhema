@@ -228,6 +228,8 @@ const TRANSLATION_COMMANDS: &[(&str, &str)] = &[
     ("in good news", "GNT"),
 ];
 
+const FIRST_NINE_NUMBERS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+
 /// Maximum chapter count per book (`book_number` 1-66).
 /// Used to reject impossible references like "Mark 30:1" (Mark has 16 chapters).
 const MAX_CHAPTERS: [i32; 67] = [
@@ -335,8 +337,15 @@ const FILLER_PHRASES: &[&str] = &[
 // Collapses consecutive digits into a single number (for verse like, psalms 1 1 2)
 fn collapse_spaced_digits(text: &str) -> String {
     let re = Regex::new(r"\b(?:\d\s+){1,}\d\b").unwrap();
+    log::info!("[collapse_spaced_digits] {text}");
+    // if !FIRST_NINE_NUMBERS.contains(&text) {
+    // println!("contains");
     re.replace_all(text, |caps: &regex::Captures| caps[0].replace(' ', ""))
         .to_string()
+    // } else {
+    // text.to_string()
+    // }
+    // if it outside the list, do not join.
 }
 
 /// Strip common sermon filler phrases from transcript text so they do not
@@ -832,6 +841,28 @@ mod tests {
         assert_eq!(results[0].verse_ref.book_name, "John");
         assert_eq!(results[0].verse_ref.chapter, 3);
         assert_eq!(results[0].verse_ref.verse_start, 16);
+    }
+
+    #[test]
+    fn test_detect_collapsed_fixed() {
+        let mut detector = DirectDetector::new();
+        let results = detector.detect("open to Galatians 5 12");
+        // assert!(!results.is_empty());
+        println!("{:?}", results);
+        assert_eq!(results[0].verse_ref.book_name, "Galatians");
+        assert_eq!(results[0].verse_ref.chapter, 5);
+        assert_eq!(results[0].verse_ref.verse_start, 12);
+    }
+
+    // #[test]
+    fn test_detect_collapsed_fixed2() {
+        let mut detector = DirectDetector::new();
+        let results = detector.detect("open to Galatians 5 1");
+        // assert!(!results.is_empty());
+        println!("{:?}", results);
+        assert_eq!(results[0].verse_ref.book_name, "Galatians");
+        assert_eq!(results[0].verse_ref.chapter, 5);
+        assert_eq!(results[0].verse_ref.verse_start, 1);
     }
 
     #[test]
