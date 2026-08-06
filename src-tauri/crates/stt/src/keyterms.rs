@@ -145,7 +145,7 @@ pub fn bible_keyterms() -> Vec<String> {
         "seventy",
         "eighty",
         "ninety",
-        "hundred"
+        "hundred",
     ];
     terms.extend(reference_terms.iter().map(ToString::to_string));
 
@@ -171,43 +171,6 @@ pub fn bible_keyterms() -> Vec<String> {
         "Song of Songs",
     ];
     terms.extend(spoken.iter().map(ToString::to_string));
-
-    // These do no aid detection
-    // Theological terms
-    // let theological = [
-    //     "justification",
-    //     "sanctification",
-    //     "propitiation",
-    //     "eschatology",
-    //     "atonement",
-    //     "redemption",
-    //     "righteousness",
-    //     "covenant",
-    //     "baptism",
-    //     "resurrection",
-    //     "crucifixion",
-    //     "salvation",
-    //     "repentance",
-    //     "grace",
-    //     "mercy",
-    //     "forgiveness",
-    //     "reconciliation",
-    //     "glorification",
-    //     "predestination",
-    //     "sovereignty",
-    //     "omniscience",
-    //     "omnipotence",
-    //     "trinity",
-    //     "incarnation",
-    //     "ascension",
-    //     "transfiguration",
-    //     "beatitudes",
-    //     "tabernacle",
-    //     "ark of the covenant",
-    //     "Melchizedek",
-    //     "Nebuchadnezzar",
-    // ];
-    // terms.extend(theological.iter().map(ToString::to_string));
 
     terms
 }

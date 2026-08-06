@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::LazyLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
@@ -228,8 +229,6 @@ const TRANSLATION_COMMANDS: &[(&str, &str)] = &[
     ("in good news", "GNT"),
 ];
 
-const FIRST_NINE_NUMBERS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
-
 /// Maximum chapter count per book (`book_number` 1-66).
 /// Used to reject impossible references like "Mark 30:1" (Mark has 16 chapters).
 const MAX_CHAPTERS: [i32; 67] = [
@@ -334,18 +333,20 @@ const FILLER_PHRASES: &[&str] = &[
     "turn in your bible to",
 ];
 
-// Collapses consecutive digits into a single number (for verse like, psalms 1 1 2)
+/// Joins runs of three or more space-separated digits into one number, so a
+/// spelled-out chapter ("psalm 1 1 2") becomes "psalm 112".
+///
+/// Two-token runs are left alone: they are nearly always a chapter/verse pair,
+/// and collapsing "Galatians 5 1" into chapter 51 is unrecoverable. Three-token
+/// runs stay ambiguous ("romans 8 2 8" could be 8:28), but are rare enough that
+/// collapsing them is the better default.
+static SPACED_DIGITS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(?:\d\s+){2,}\d\b").expect("literal pattern is valid"));
+
 fn collapse_spaced_digits(text: &str) -> String {
-    let re = Regex::new(r"\b(?:\d\s+){1,}\d\b").unwrap();
-    log::info!("[collapse_spaced_digits] {text}");
-    // if !FIRST_NINE_NUMBERS.contains(&text) {
-    // println!("contains");
-    re.replace_all(text, |caps: &regex::Captures| caps[0].replace(' ', ""))
+    SPACED_DIGITS
+        .replace_all(text, |caps: &regex::Captures| caps[0].replace(' ', ""))
         .to_string()
-    // } else {
-    // text.to_string()
-    // }
-    // if it outside the list, do not join.
 }
 
 /// Strip common sermon filler phrases from transcript text so they do not
@@ -355,9 +356,7 @@ fn collapse_spaced_digits(text: &str) -> String {
 /// plus a special pattern for "look at" when followed by what looks like a book name
 /// (starts with an uppercase letter).
 fn clean_transcript(text: &str) -> String {
-    // Combine consecutive digits
-    let text = collapse_spaced_digits(text);
-    let mut result = text.to_string();
+    let mut result = collapse_spaced_digits(text);
 
     // Remove fixed filler phrases (case-insensitive)
     for phrase in FILLER_PHRASES {
@@ -847,19 +846,17 @@ mod tests {
     fn test_detect_collapsed_fixed() {
         let mut detector = DirectDetector::new();
         let results = detector.detect("open to Galatians 5 12");
-        // assert!(!results.is_empty());
-        println!("{:?}", results);
+        assert!(!results.is_empty());
         assert_eq!(results[0].verse_ref.book_name, "Galatians");
         assert_eq!(results[0].verse_ref.chapter, 5);
         assert_eq!(results[0].verse_ref.verse_start, 12);
     }
 
-    // #[test]
+    #[test]
     fn test_detect_collapsed_fixed2() {
         let mut detector = DirectDetector::new();
         let results = detector.detect("open to Galatians 5 1");
-        // assert!(!results.is_empty());
-        println!("{:?}", results);
+        assert!(!results.is_empty());
         assert_eq!(results[0].verse_ref.book_name, "Galatians");
         assert_eq!(results[0].verse_ref.chapter, 5);
         assert_eq!(results[0].verse_ref.verse_start, 1);
@@ -869,11 +866,47 @@ mod tests {
     fn test_detect_collapsed_basic_digits() {
         let mut detector = DirectDetector::new();
         let results = detector.detect("David in Psalm 1 1 2 verse one now says");
-        // assert!(!results.is_empty());
-        println!("{:?}", results);
+        assert!(!results.is_empty());
         assert_eq!(results[0].verse_ref.book_name, "Psalms");
         assert_eq!(results[0].verse_ref.chapter, 112);
         assert_eq!(results[0].verse_ref.verse_start, 1);
+    }
+
+    #[test]
+    fn test_single_digit_chapter_and_verse_survive_collapsing() {
+        for (text, book, chapter, verse) in [
+            ("open to Galatians 5 1", "Galatians", 5, 1),
+            ("turn to John 3 5", "John", 3, 5),
+            ("let's read Genesis 1 1", "Genesis", 1, 1),
+            ("Romans 8 1 is our text", "Romans", 8, 1),
+        ] {
+            let mut detector = DirectDetector::new();
+            let results = detector.detect(text);
+            assert!(!results.is_empty(), "no detection for {text:?}");
+            assert_eq!(results[0].verse_ref.book_name, book, "book for {text:?}");
+            assert_eq!(
+                results[0].verse_ref.chapter, chapter,
+                "chapter for {text:?}"
+            );
+            assert_eq!(
+                results[0].verse_ref.verse_start, verse,
+                "verse for {text:?}"
+            );
+        }
+    }
+
+    /// Collapsing "Genesis 1 1" to chapter 11 used to leave a chapter-only
+    /// pending reference, which the next segment ("verse 5") completed into
+    /// Genesis 11:5 — a wrong verse emitted with full confidence.
+    #[test]
+    fn test_collapsing_does_not_poison_pending_chapter() {
+        let mut detector = DirectDetector::new();
+        let results = detector.detect("let's turn to Genesis 1 1");
+        assert!(!results.is_empty());
+        assert_eq!(results[0].verse_ref.book_name, "Genesis");
+        assert_eq!(results[0].verse_ref.chapter, 1);
+        assert_eq!(results[0].verse_ref.verse_start, 1);
+        assert!(detector.incomplete.is_none());
     }
 
     #[test]
@@ -887,15 +920,16 @@ mod tests {
     }
 
     #[test]
-    fn test_collapses_two_digits() {
-        assert_eq!(collapse_spaced_digits("john 1 6"), "john 16");
+    fn test_does_not_collapse_chapter_verse_pair() {
+        assert_eq!(collapse_spaced_digits("john 1 6"), "john 1 6");
+        assert_eq!(collapse_spaced_digits("galatians 5 1"), "galatians 5 1");
     }
 
     #[test]
-    fn test_collapses_multiple_digit_sequences() {
+    fn test_collapses_only_runs_of_three_or_more() {
         assert_eq!(
             collapse_spaced_digits("john 1 1 romans 8 2 8"),
-            "john 11 romans 828"
+            "john 1 1 romans 828"
         );
     }
 
@@ -910,8 +944,9 @@ mod tests {
     }
 
     #[test]
-    fn test_collapses_digits_after_punctuation() {
-        assert_eq!(collapse_spaced_digits("john 1, 1 2"), "john 1, 12");
+    fn test_punctuation_breaks_a_digit_run() {
+        assert_eq!(collapse_spaced_digits("john 1, 1 2"), "john 1, 1 2");
+        assert_eq!(collapse_spaced_digits("john 1, 1 2 3"), "john 1, 123");
     }
 
     #[test]
@@ -927,11 +962,6 @@ mod tests {
     #[test]
     fn test_does_not_collapse_alphanumeric_sequences() {
         assert_eq!(collapse_spaced_digits("a1 2b"), "a1 2b");
-    }
-
-    #[test]
-    fn test_collapse_leaves_single_digit() {
-        assert_eq!(collapse_spaced_digits("john 1"), "john 1");
     }
 
     #[test]
