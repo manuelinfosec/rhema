@@ -54,8 +54,12 @@ pub fn list_monitors(app: tauri::AppHandle) -> Result<Vec<MonitorInfo>, String> 
 }
 
 /// Ensure the broadcast window for a given output exists (creates hidden if not).
+///
+/// Async on purpose: on Windows, building a webview window from a synchronous
+/// command deadlocks — the command blocks the thread the window creation
+/// needs to dispatch to, and `build()` never returns.
 #[tauri::command]
-pub fn ensure_broadcast_window(app: tauri::AppHandle, output_id: String) -> Result<(), String> {
+pub async fn ensure_broadcast_window(app: tauri::AppHandle, output_id: String) -> Result<(), String> {
     let label = window_label(&output_id);
     if app.get_webview_window(label).is_some() {
         return Ok(());
@@ -75,8 +79,10 @@ pub fn ensure_broadcast_window(app: tauri::AppHandle, output_id: String) -> Resu
     Ok(())
 }
 
+/// Async on purpose — see [`ensure_broadcast_window`]: sync window creation
+/// deadlocks on Windows.
 #[tauri::command]
-pub fn open_broadcast_window(
+pub async fn open_broadcast_window(
     app: tauri::AppHandle,
     output_id: String,
     monitor_index: usize,
@@ -90,50 +96,60 @@ pub fn open_broadcast_window(
     let pos = monitor.position();
     let size = monitor.size();
 
-    // If window already exists (e.g. hidden for NDI), reuse it
-    if let Some(window) = app.get_webview_window(label) {
+    // Reuse the window if it already exists (e.g. hidden for NDI), otherwise
+    // create it hidden and without geometry: the builder's position/inner_size
+    // take logical pixels, so passing the monitor's physical values gets
+    // re-multiplied by the scale factor on scaled displays (Windows commonly
+    // runs 125-150%), pushing the window off the target monitor. Physical
+    // setters after the fact are unambiguous on both paths.
+    let window = if let Some(window) = app.get_webview_window(label) {
         window
-            .set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                x: pos.x,
-                y: pos.y,
-            }))
-            .map_err(|e| e.to_string())?;
-        window
-            .set_size(tauri::Size::Physical(tauri::PhysicalSize {
-                width: size.width,
-                height: size.height,
-            }))
-            .map_err(|e| e.to_string())?;
-        window.show().map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-
-    let title = if output_id == "alt" {
-        "Projector - Alt"
     } else {
-        "Projector - Program"
+        let title = if output_id == "alt" {
+            "Projector - Alt"
+        } else {
+            "Projector - Program"
+        };
+        WebviewWindowBuilder::new(
+            &app,
+            label,
+            WebviewUrl::App(window_url(&output_id).into()),
+        )
+        .title(title)
+        .visible(false)
+        .decorations(true)
+        .always_on_top(false)
+        .skip_taskbar(false)
+        .focused(false)
+        .build()
+        .map_err(|e| e.to_string())?
     };
 
-    WebviewWindowBuilder::new(
-        &app,
-        label,
-        WebviewUrl::App(window_url(&output_id).into()),
-    )
-    .title(title)
-    .position(f64::from(pos.x), f64::from(pos.y))
-    .inner_size(f64::from(size.width), f64::from(size.height))
-    .decorations(true)
-    .always_on_top(false)
-    .skip_taskbar(false)
-    .focused(true)
-    .build()
-    .map_err(|e| e.to_string())?;
+    window
+        .set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+            x: pos.x,
+            y: pos.y,
+        }))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_size(tauri::Size::Physical(tauri::PhysicalSize {
+            width: size.width,
+            height: size.height,
+        }))
+        .map_err(|e| e.to_string())?;
+    // A window created hidden for NDI has skip_taskbar(true); make sure the
+    // visible projector is reachable from the taskbar either way.
+    let _ = window.set_skip_taskbar(false);
+    window.show().map_err(|e| e.to_string())?;
+    let _ = window.set_focus();
 
     Ok(())
 }
 
+/// Async on purpose — `Window::hide`/`close` also round-trip through the
+/// main thread and can deadlock in a sync command on Windows.
 #[tauri::command]
-pub fn close_broadcast_window(
+pub async fn close_broadcast_window(
     app: tauri::AppHandle,
     output_id: String,
     runtime: State<'_, Mutex<NdiRuntime>>,
