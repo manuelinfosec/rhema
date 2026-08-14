@@ -117,12 +117,21 @@ pub fn ui_mark(label: String, epoch_ms: f64) {
 /// Check if semantic search is available
 #[tauri::command]
 pub fn detection_status(
+    state: State<'_, Mutex<AppState>>,
     pipeline_state: State<'_, Mutex<DetectionPipeline>>,
 ) -> Result<DetectionStatusResult, String> {
-    let pipeline = pipeline_state.lock().map_err(|e| e.to_string())?;
+    let has_semantic = {
+        let pipeline = pipeline_state.lock().map_err(|e| e.to_string())?;
+        pipeline.has_semantic()
+    };
+    let embedding_warning = {
+        let app_state = state.lock().map_err(|e| e.to_string())?;
+        app_state.embedding_warning.clone()
+    };
     Ok(DetectionStatusResult {
         has_direct: true,
-        has_semantic: pipeline.has_semantic(),
+        has_semantic,
+        embedding_warning,
     })
 }
 
@@ -130,6 +139,9 @@ pub fn detection_status(
 pub struct DetectionStatusResult {
     pub has_direct: bool,
     pub has_semantic: bool,
+    /// Set when the embedding index provably mismatches the loaded model —
+    /// the UI shows this as a warning banner.
+    pub embedding_warning: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -165,12 +177,13 @@ pub fn semantic_search(
     // overlap to surface.
     let depth = (3 * k).max(30);
 
-    // Lock pipeline for vector search (may be slow if ONNX runs)
+    // Lock pipeline for vector search (may be slow if ONNX runs). The
+    // embedding model is OPTIONAL: without it the detector is a stub that
+    // returns no vector hits, and the search below degrades to FTS5 with
+    // phrase-priority ordering — full-quality keyword + reference search
+    // with zero model assets installed.
     let vector_results = {
         let mut pipeline = pipeline_state.lock().map_err(|e| e.to_string())?;
-        if !pipeline.has_semantic() {
-            return Err("Semantic search not available — model or embeddings not loaded".into());
-        }
         pipeline.semantic_search(&query, depth)
     }; // Pipeline lock dropped
 
