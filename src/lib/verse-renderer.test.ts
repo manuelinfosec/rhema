@@ -78,6 +78,17 @@ function stubCtx(): CanvasRenderingContext2D {
   } as unknown as CanvasRenderingContext2D
 }
 
+// Lower Thirds' band, derived from the theme so tuning the builtin's
+// proportions doesn't invalidate what these tests actually check: that the
+// backdrop sits at the anchored text area and never follows element boxes.
+const LOWER_THIRDS = BUILTIN_THEMES[2]
+const ANCHORED_BAND = {
+  x: 0,
+  y: 1080 - (LOWER_THIRDS.layout.textAreaHeight / 100) * 1080,
+  width: (LOWER_THIRDS.layout.textAreaWidth / 100) * 1920,
+  height: (LOWER_THIRDS.layout.textAreaHeight / 100) * 1080,
+}
+
 const VERSE: VerseRenderData = {
   reference: "Genesis 1:1 (KJV)",
   segments: [
@@ -186,10 +197,13 @@ describe("computeVerseLayoutMetrics — stacked mode", () => {
     expect(lowerThirds.name).toBe("Lower Thirds")
     const metrics = computeVerseLayoutMetrics(stubCtx(), lowerThirds, VERSE)
     expect(metrics.referenceRect!.y).toBeLessThan(metrics.verseRect!.y)
-    // Both share one left edge, inset from the band by the layout padding.
+    // Both share one left edge, inset from the band by the layout padding
+    // plus the container surface's own padding.
     expect(metrics.referenceRect!.x).toBe(metrics.verseRect!.x)
     expect(metrics.referenceRect!.x).toBe(
-      metrics.textAreaRect.x + lowerThirds.layout.padding.left
+      metrics.textAreaRect.x +
+        lowerThirds.layout.padding.left +
+        lowerThirds.textBox.padding
     )
   })
 
@@ -263,9 +277,6 @@ function overlayFreeTheme(): BroadcastTheme {
 }
 
 describe("computeVerseLayoutMetrics — text box backdrop", () => {
-  // Lower Thirds: textArea 90% × 40%, anchored bottom-center →
-  // {x: 96, y: 648, width: 1728, height: 432}.
-  const ANCHORED_BAND = { x: 96, y: 648, width: 1728, height: 432 }
 
   it("equals the anchored text area in stacked mode", () => {
     const metrics = computeVerseLayoutMetrics(stubCtx(), BUILTIN_THEMES[2], VERSE)
@@ -297,9 +308,168 @@ describe("computeVerseLayoutMetrics — text box backdrop", () => {
     renderVerse(ctx, overlayFreeTheme(), VERSE)
     // roundRect starts with moveTo(x + radius, y); Lower Thirds radius = 12.
     const moveTos = calls.filter((c) => c.method === "moveTo")
-    expect(moveTos.some((c) => c.args[0] === 96 + 12 && c.args[1] === 648)).toBe(
+    expect(
+      moveTos.some(
+        (c) => c.args[0] === ANCHORED_BAND.x + 12 && c.args[1] === ANCHORED_BAND.y
+      )
+    ).toBe(
       true
     )
+  })
+})
+
+describe("surface fills", () => {
+  const BAND_IMAGE = "data:image/png;base64,band"
+
+  function stubImage(): HTMLImageElement {
+    return { naturalWidth: 1920, naturalHeight: 300 } as HTMLImageElement
+  }
+
+  function themeWithContainerImage(): BroadcastTheme {
+    const base = BUILTIN_THEMES[2] // Lower Thirds
+    return {
+      ...base,
+      textBox: {
+        ...base.textBox,
+        image: {
+          url: BAND_IMAGE,
+          fit: "cover",
+          blur: 0,
+          brightness: 100,
+          tint: null,
+        },
+      },
+    }
+  }
+
+  it("draws a container image into the container rect, not the background rect", () => {
+    const { ctx, calls } = recordingCtx()
+    const theme = themeWithContainerImage()
+    renderVerse(ctx, theme, VERSE, {
+      imageCache: new Map([[BAND_IMAGE, stubImage()]]),
+    })
+
+    const draws = calls.filter((c) => c.method === "drawImage")
+    expect(draws).toHaveLength(1)
+    // drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh): the source is the
+    // artwork's own bounds, the destination is the container.
+    const [, sx, sy, sw, sh, , , dw, dh] = draws[0].args as number[]
+    expect([sx, sy, sw, sh]).toEqual([0, 0, 1920, 300])
+    // "cover" on a 1920x300 image in the band: scaled to the band's height
+    // and centred horizontally, so it overflows the band's width.
+    expect(dh).toBe(ANCHORED_BAND.height)
+    expect(dw).toBeCloseTo(ANCHORED_BAND.height * (1920 / 300), 5)
+  })
+
+  it("fits the artwork's bounds, ignoring transparent margins", async () => {
+    // Artwork exported in the corner of a big transparent canvas: fitting the
+    // whole canvas would shrink the visible band into a corner of the band.
+    const { imageContentBox } = await import("./theme-image-cache")
+    const wideCanvasArtwork = {
+      naturalWidth: 1920,
+      naturalHeight: 1080,
+    } as HTMLImageElement
+    // Without a real 2d context the measurement degrades to the full image
+    // rather than throwing, which is what the renderer relies on.
+    expect(imageContentBox(wideCanvasArtwork)).toEqual({
+      sx: 0,
+      sy: 0,
+      sw: 1920,
+      sh: 1080,
+    })
+  })
+
+  it("clips the container image to the surface, not the whole frame", () => {
+    const { ctx, calls } = recordingCtx()
+    renderVerse(ctx, themeWithContainerImage(), VERSE, {
+      imageCache: new Map([[BAND_IMAGE, stubImage()]]),
+    })
+    expect(calls.some((c) => c.method === "clip")).toBe(true)
+    // The rounded clip path starts at the band's own corner radius.
+    const moveTos = calls.filter((c) => c.method === "moveTo")
+    expect(
+      moveTos.some(
+        (c) => c.args[0] === ANCHORED_BAND.x + 12 && c.args[1] === ANCHORED_BAND.y
+      )
+    ).toBe(
+      true
+    )
+  })
+
+  it("insets the text by the container's padding", () => {
+    const base = BUILTIN_THEMES[2]
+    const padded = computeVerseLayoutMetrics(stubCtx(), base, VERSE)
+    const unpadded = computeVerseLayoutMetrics(
+      stubCtx(),
+      { ...base, textBox: { ...base.textBox, padding: 0 } },
+      VERSE
+    )
+    expect(padded.textRect.x - unpadded.textRect.x).toBe(base.textBox.padding)
+    expect(padded.textRect.width).toBe(
+      unpadded.textRect.width - base.textBox.padding * 2
+    )
+  })
+
+  it("ignores container padding when the container is disabled", () => {
+    const base = BUILTIN_THEMES[2]
+    const off = computeVerseLayoutMetrics(
+      stubCtx(),
+      { ...base, textBox: { ...base.textBox, enabled: false } },
+      VERSE
+    )
+    const zeroPad = computeVerseLayoutMetrics(
+      stubCtx(),
+      { ...base, textBox: { ...base.textBox, enabled: false, padding: 0 } },
+      VERSE
+    )
+    expect(off.textRect).toEqual(zeroPad.textRect)
+  })
+
+  it("leaves per-element surfaces off when the theme does not define them", () => {
+    const metrics = computeVerseLayoutMetrics(stubCtx(), BUILTIN_THEMES[2], VERSE)
+    expect(metrics.referenceSurfaceRect).toBeNull()
+    expect(metrics.verseSurfaceRect).toBeNull()
+  })
+
+  it("hugs the reference text when the reference has its own plate", () => {
+    const base = BUILTIN_THEMES[2]
+    const theme: BroadcastTheme = {
+      ...base,
+      reference: {
+        ...base.reference,
+        surface: {
+          enabled: true,
+          color: "#000000",
+          opacity: 1,
+          borderRadius: 4,
+          padding: 10,
+          image: null,
+        },
+      },
+    }
+    const metrics = computeVerseLayoutMetrics(stubCtx(), theme, VERSE)
+    const chip = metrics.referenceSurfaceRect!
+    const text = metrics.referenceRect!
+    expect(chip.x).toBe(text.x - 10)
+    expect(chip.width).toBe(text.width + 20)
+    // A chip hugs its text, so it must be narrower than the whole band.
+    expect(chip.width).toBeLessThan(metrics.textBoxRect.width)
+  })
+
+  it("scales surface radius, padding and image blur with the render scale", () => {
+    const base = themeWithContainerImage()
+    const theme: BroadcastTheme = {
+      ...base,
+      textBox: { ...base.textBox, image: { ...base.textBox.image!, blur: 8 } },
+    }
+    const metrics = computeVerseLayoutMetrics(stubCtx(), theme, VERSE, {
+      scale: 0.5,
+    })
+    expect(metrics.scaledTheme.textBox.borderRadius).toBe(
+      theme.textBox.borderRadius * 0.5
+    )
+    expect(metrics.scaledTheme.textBox.padding).toBe(theme.textBox.padding * 0.5)
+    expect(metrics.scaledTheme.textBox.image!.blur).toBe(4)
   })
 })
 
