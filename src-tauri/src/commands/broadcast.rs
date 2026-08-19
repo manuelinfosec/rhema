@@ -144,6 +144,9 @@ pub async fn open_broadcast_window(
         .always_on_top(false)
         .skip_taskbar(false)
         .focused(false)
+        .decorations(false)
+        .fullscreen(true)
+        .minimizable(false)
         .build()
         .map_err(|e| {
             log::error!("open_broadcast_window: window build failed: {e}");
